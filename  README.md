@@ -157,7 +157,7 @@ graceful_timeout=10      # 优雅关闭超时时间（秒）
 
 2. **进程频繁重启**
     - 检查程序是否有运行时错误
-    - 调整[restart_delay](file://\\wsl.localhost\Ubuntu\home\lsx\Code\ProcessMonitor\process.h#L59-L59)参数
+    - 调整restart_delay参数
     - 查看详细日志定位问题
 
 3. **僵尸进程未清理**
