@@ -1,182 +1,138 @@
 ####################################################################################################
-# 📘 通用 CMake 构建系统模板说明文档（支持编译可执行文件或库）
-# 作者 ： 连思鑫
-# 本构建系统支持以下功能：
-#   ✅ 自动收集源文件和头文件
-#   ✅ 支持三种构建目标：可执行文件 / 静态库 / 动态库
-#   ✅ 适配多平台交叉编译（x86、arm32、arm64）
-#   ✅ 链接外部静态库（如 SQLite）
-#   ✅ 可选启用 OpenMP 支持
-#   ✅ 编译选项集中管理，易扩展
+# ProcessMonitor 构建脚本
 #
-# 📁 推荐项目目录结构：
-#   project_root/
-#   ├── CMakeLists.txt
-#   ├── src/                # 项目源文件
-#   ├── include/            # 项目头文件
-#   ├── lib/                # 可选本地库
-#   ├── build/              # 构建目录
-#   └── external/           # 第三方库（如 Sqlite）
+# 用法：
+#   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build -j
+#   ctest --test-dir build --output-on-failure
 #
-# 🧩 可配置选项（通过命令行传入）：
-#   -DCOMPILER_TARGET=x86|arm32|arm64             # 目标平台
-#   -DPUBLIC_PACKAGE_DIR=/path/to/packages|NO     # 第三方库路径 / NO表示不引入第三方库路径
-#   -DCMAKE_BUILD_TYPE=Release|Debug              # 构建类型
-#   -DENABLE_OPENMP=ON|OFF                        # 是否启用 OpenMP
-#   -DTARGET_TYPE=executable|static|shared        # 目标类型：可执行 / 静态库 / 动态库
-#
-# ✅ 构建示例：
-#   mkdir build && cd build
-#   cmake .. -DCOMPILER_TARGET=arm32 -DPUBLIC_PACKAGE_DIR=/home/lsx/PublicPackage -DTARGET_TYPE=static
-#   make -j
-#
+# 可配置选项：
+#   -DCOMPILER_TARGET=x86|arm32|arm64     目标架构
+#   -DCMAKE_BUILD_TYPE=Release|Debug
+#   -DENABLE_SANITIZER=address|thread|undefined|OFF
+#   -DWARNINGS_AS_ERRORS=ON|OFF
+#   -DTARGET_TYPE=executable|static|shared
 ####################################################################################################
 
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 
-# 项目名称与语言
 if (NOT DEFINED PROJECT_NAME)
     set(PROJECT_NAME "ProcessMonitor")
 endif ()
-project(${PROJECT_NAME} LANGUAGES C CXX)
 
-# 构建类型默认值
-if (NOT CMAKE_BUILD_TYPE)
+# 交叉编译工具链必须在 project() 之前设置：旧版把 set(CMAKE_CXX_COMPILER ...)
+# 写在 project() 之后，CMake 直接忽略，导致 -DCOMPILER_TARGET=arm64 仍产出 x86 二进制。
+set(COMPILER_TARGET "x86" CACHE STRING "Target architecture: x86, arm32, arm64")
+if (COMPILER_TARGET STREQUAL "arm64")
+    set(CMAKE_SYSTEM_NAME Linux)
+    set(CMAKE_SYSTEM_PROCESSOR aarch64)
+    set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
+elseif (COMPILER_TARGET STREQUAL "arm32")
+    set(CMAKE_SYSTEM_NAME Linux)
+    set(CMAKE_SYSTEM_PROCESSOR arm)
+    # 优先用 PATH 里的工具链；找不到时回退到 Linaro 的常见安装位置，
+    # 这样不必把绝对路径硬编码在构建脚本里。
+    find_program(PM_ARM32_CXX arm-linux-gnueabihf-g++)
+    if (NOT PM_ARM32_CXX)
+        find_program(PM_ARM32_CXX arm-linux-gnueabihf-g++
+                PATHS /opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin
+                NO_DEFAULT_PATH)
+    endif ()
+    if (NOT PM_ARM32_CXX)
+        message(FATAL_ERROR "arm32 toolchain not found: install arm-linux-gnueabihf-g++ "
+                "or add it to PATH")
+    endif ()
+    set(CMAKE_CXX_COMPILER ${PM_ARM32_CXX})
+elseif (NOT COMPILER_TARGET STREQUAL "x86")
+    message(FATAL_ERROR "Unsupported COMPILER_TARGET: ${COMPILER_TARGET} (x86|arm32|arm64)")
+endif ()
+
+project(${PROJECT_NAME} VERSION 1.1.0 LANGUAGES CXX)
+
+if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (Release or Debug)" FORCE)
 endif ()
 
-# 编译标准
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ===================== 用户配置变量 =====================
-set(COMPILER_TARGET "x86" CACHE STRING "Target architecture: x86, arm32, arm64")
-set(PUBLIC_PACKAGE_DIR "NO" CACHE PATH "External packages root path or NO")
 set(TARGET_TYPE "executable" CACHE STRING "Build target type: executable | static | shared")
-option(ENABLE_OPENMP "Enable OpenMP parallelism" OFF)
+set(ENABLE_SANITIZER "OFF" CACHE STRING "Sanitizer: OFF | address | thread | undefined")
+option(WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
+option(ENABLE_TESTS "Build the regression test suite" ON)
 # ========================================================
 
-# ===================== 是否启用外部包 =====================
-set(USE_PUBLIC_PACKAGE ON)
-if (PUBLIC_PACKAGE_DIR STREQUAL "NO")
-    set(USE_PUBLIC_PACKAGE OFF)
-endif ()
-# ==========================================================
+find_package(Threads REQUIRED)
 
-# ===================== 架构与交叉编译 =====================
-if (COMPILER_TARGET STREQUAL "arm64")
-    set(CMAKE_SYSTEM_NAME Linux)
-    set(CMAKE_C_COMPILER "/bin/aarch64-linux-gnu-gcc")
-    set(CMAKE_CXX_COMPILER "/bin/aarch64-linux-gnu-g++")
-    if (USE_PUBLIC_PACKAGE)
-        set(SQLITE_LIB_DIR "${PUBLIC_PACKAGE_DIR}/Sqlite/lib/arm64")
-        set(SQLITE3_LIB "${SQLITE_LIB_DIR}/libsqlite3.a")
-    endif ()
-
-elseif (COMPILER_TARGET STREQUAL "arm32")
-    set(CMAKE_SYSTEM_NAME Linux)
-    set(CMAKE_C_COMPILER "/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin/arm-linux-gnueabihf-gcc")
-    set(CMAKE_CXX_COMPILER "/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin/arm-linux-gnueabihf-g++")
-    if (USE_PUBLIC_PACKAGE)
-        set(SQLITE_LIB_DIR "${PUBLIC_PACKAGE_DIR}/Sqlite/lib/arm32")
-        set(SQLITE3_LIB "${SQLITE_LIB_DIR}/libsqlite3.a")
-    endif ()
-
-elseif (COMPILER_TARGET STREQUAL "x86")
-    set(CMAKE_C_COMPILER "gcc")
-    set(CMAKE_CXX_COMPILER "g++")
-    if (USE_PUBLIC_PACKAGE)
-        set(SQLITE_LIB_DIR "${PUBLIC_PACKAGE_DIR}/Sqlite/lib/x86")
-        set(SQLITE3_LIB "${SQLITE_LIB_DIR}/libsqlite3.a")
-    endif ()
-
-else ()
-    message(FATAL_ERROR "Unsupported COMPILER_TARGET: ${COMPILER_TARGET}")
-endif ()
-
-link_directories(${SQLITE_LIB_DIR})
-
-# ===================== 自动收集源文件与头文件 =====================
-file(GLOB_RECURSE SRC_FILES
-        "${CMAKE_SOURCE_DIR}/*.cpp"
-        "${CMAKE_SOURCE_DIR}/*.cc"
+# ===================== 编译选项 =====================
+add_library(pm_warnings INTERFACE)
+target_compile_options(pm_warnings INTERFACE
+        -Wall -Wextra -Wpedantic
+        -Wshadow -Wnon-virtual-dtor
+        -Wcast-align -Wunused -Woverloaded-virtual
+        -Wnull-dereference -Wdouble-promotion
+        -Wformat=2
 )
-
-file(GLOB_RECURSE HEADER_FILES
-        "${CMAKE_SOURCE_DIR}/*.h"
-        "${CMAKE_SOURCE_DIR}/*.hpp"
-)
-
-if (USE_PUBLIC_PACKAGE)
-    file(GLOB_RECURSE EXT_SRC_FILES
-            "${PUBLIC_PACKAGE_DIR}/*.cpp"
-            "${PUBLIC_PACKAGE_DIR}/*.cc"
-    )
-    file(GLOB_RECURSE EXT_HDR_FILES
-            "${PUBLIC_PACKAGE_DIR}/*.h"
-            "${PUBLIC_PACKAGE_DIR}/*.hpp"
-    )
-    list(APPEND SRC_FILES ${EXT_SRC_FILES})
-    list(APPEND HEADER_FILES ${EXT_HDR_FILES})
+if (WARNINGS_AS_ERRORS)
+    target_compile_options(pm_warnings INTERFACE -Werror)
 endif ()
 
-# 排除构建目录文件
-list(FILTER SRC_FILES EXCLUDE REGEX "${CMAKE_BINARY_DIR}")
-list(FILTER SRC_FILES EXCLUDE REGEX ".*/CMakeFiles/.*")
-list(FILTER SRC_FILES EXCLUDE REGEX "${CMAKE_BINARY_DIR}/.*")
+if (ENABLE_SANITIZER STREQUAL "address")
+    target_compile_options(pm_warnings INTERFACE -fsanitize=address -fno-omit-frame-pointer)
+    target_link_options(pm_warnings INTERFACE -fsanitize=address)
+elseif (ENABLE_SANITIZER STREQUAL "thread")
+    target_compile_options(pm_warnings INTERFACE -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(pm_warnings INTERFACE -fsanitize=thread)
+elseif (ENABLE_SANITIZER STREQUAL "undefined")
+    target_compile_options(pm_warnings INTERFACE -fsanitize=undefined -fno-omit-frame-pointer)
+    target_link_options(pm_warnings INTERFACE -fsanitize=undefined)
+endif ()
 
+add_library(pm_hardening INTERFACE)
+target_compile_options(pm_hardening INTERFACE -fstack-protector-strong)
+target_link_options(pm_hardening INTERFACE -Wl,-z,relro -Wl,-z,now)
+# ========================================================
 
-# 提取唯一头文件目录
-set(INCLUDE_DIRS "")
-foreach (HDR ${HEADER_FILES})
-    get_filename_component(DIR ${HDR} DIRECTORY)
-    list(APPEND INCLUDE_DIRS ${DIR})
-endforeach ()
-list(REMOVE_DUPLICATES INCLUDE_DIRS)
+# ===================== 核心代码 =====================
+set(PM_CORE_SOURCES process.cpp)
+set(PM_CORE_HEADERS process.h)
 
-# ===================== 构建目标定义 =====================
 if (TARGET_TYPE STREQUAL "executable")
-    add_executable(${PROJECT_NAME} ${SRC_FILES})
+    add_library(pm_core STATIC ${PM_CORE_SOURCES} ${PM_CORE_HEADERS})
+    target_include_directories(pm_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(pm_core PUBLIC pm_warnings PRIVATE Threads::Threads)
+    set_target_properties(pm_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 elseif (TARGET_TYPE STREQUAL "static")
-    add_library(${PROJECT_NAME} STATIC ${SRC_FILES})
+    add_library(${PROJECT_NAME} STATIC ${PM_CORE_SOURCES} ${PM_CORE_HEADERS})
+    target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(${PROJECT_NAME} PUBLIC pm_warnings PRIVATE Threads::Threads)
 elseif (TARGET_TYPE STREQUAL "shared")
-    add_library(${PROJECT_NAME} SHARED ${SRC_FILES})
+    add_library(${PROJECT_NAME} SHARED ${PM_CORE_SOURCES} ${PM_CORE_HEADERS})
+    target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(${PROJECT_NAME} PUBLIC pm_warnings PRIVATE Threads::Threads)
 else ()
-    message(FATAL_ERROR "Invalid TARGET_TYPE: ${TARGET_TYPE} (must be executable|static|shared)")
+    message(FATAL_ERROR "Invalid TARGET_TYPE: ${TARGET_TYPE} (executable|static|shared)")
 endif ()
+# ========================================================
 
-# 包含头文件路径
-target_include_directories(${PROJECT_NAME} PUBLIC ${INCLUDE_DIRS})
-
-# ===================== 链接库设置 =====================
-# 只有构建可执行文件时才链接系统库
+# ===================== 可执行文件 =====================
 if (TARGET_TYPE STREQUAL "executable")
-    target_link_libraries(${PROJECT_NAME}
-            PRIVATE
-            ${SQLITE3_LIB}
-            pthread
-            rt
-            dl
-            m
-            "-Wl,--start-group"
-            "-Wl,--end-group"
-    )
-
-    # 链接安全设置（仅限可执行）
+    add_executable(${PROJECT_NAME} main.cpp)
+    target_link_libraries(${PROJECT_NAME} PRIVATE pm_core pm_hardening)
     set_target_properties(${PROJECT_NAME} PROPERTIES
-            LINK_WHAT_YOU_USE TRUE
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+            POSITION_INDEPENDENT_CODE ON
     )
+    install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
+    install(FILES config.ini DESTINATION etc/processmonitor)
 endif ()
+# ========================================================
 
-# ===================== OpenMP 支持（可选） =====================
-option(ENABLE_OPENMP "Enable OpenMP parallelism" OFF)
-
-if (ENABLE_OPENMP)
-    find_package(OpenMP REQUIRED)
-    if (OpenMP_FOUND)
-        message(STATUS "OpenMP enabled")
-        target_compile_options(${PROJECT_NAME} PRIVATE ${OpenMP_C_FLAGS} ${OpenMP_CXX_FLAGS})
-        target_link_libraries(${PROJECT_NAME} PRIVATE ${OpenMP_EXE_LINKER_FLAGS})
-    endif ()
+# ===================== 测试 =====================
+if (ENABLE_TESTS AND TARGET_TYPE STREQUAL "executable")
+    enable_testing()
+    add_subdirectory(tests)
 endif ()
+# ========================================================

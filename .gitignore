@@ -1,0 +1,14 @@
+# 构建产物
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.o
+*.a
+*.so
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.iml
