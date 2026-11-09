@@ -92,7 +92,10 @@ endif ()
 
 add_library(pm_hardening INTERFACE)
 target_compile_options(pm_hardening INTERFACE -fstack-protector-strong)
-target_link_options(pm_hardening INTERFACE -Wl,-z,relro -Wl,-z,now)
+# -z relro/now 是 ELF 链接器选项，PE（MinGW）链接器不认，会报 "unrecognized option '-z'"
+if (NOT WIN32)
+    target_link_options(pm_hardening INTERFACE -Wl,-z,relro -Wl,-z,now)
+endif ()
 # ========================================================
 
 # ===================== 核心代码 =====================

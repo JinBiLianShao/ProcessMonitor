@@ -36,6 +36,10 @@
 
 #ifdef _WIN32
 #include <windows.h>
+// windows.h 里有 #define ERROR 0，会把下面的 LogLevel::ERROR 冲成
+// LogLevel::0，编 Windows 版时报一片 "expected identifier before numeric constant"。
+// 我们不用这个宏，直接撤掉，枚举名就能跨平台保持一致。
+#undef ERROR
 #else
 #include <sys/types.h>
 #endif
